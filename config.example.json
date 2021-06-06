@@ -1,9 +1,17 @@
 {
+    "port": 389,
     "bindDN": "",
     "searchBase": "ou=domain.local, dc=domain, dc=local",
     "server": {
         "url": "ldap://127.0.0.1",
         "bindDN": "ldap",
         "bindPW": "passwd"
-    }
+    },
+    "mappingUsers": [
+        {
+            "sAMAccountName": "user2",
+            "searchBase": "ou=special, dc=domain, dc=local",
+            "mappingGroup": "ou=it"
+        }
+    ]
 }
