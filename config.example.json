@@ -1,7 +1,7 @@
 {
     "port": 389,
     "bindDN": "",
-    "searchBase": "ou=domain.local, dc=domain, dc=local",
+    "searchBase": ["ou=domain.local, dc=domain, dc=local"],
     "server": {
         "url": "ldap://127.0.0.1",
         "bindDN": "ldap",

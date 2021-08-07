@@ -97,6 +97,51 @@ function merge_group_maps(m1, m2) {
         }
         m1[k] = Array.prototype.concat.apply(m1[k], m2[k])
     }
+    join_level1_group(groupUserMaps)
+}
+
+function join_level1_group(m) {
+    let firstGroupTitle = null
+    for (const title in m) {
+        if (title.indexOf('-') >= 0 ) {
+            continue
+        }
+        if (!firstGroupTitle) {
+            firstGroupTitle = title
+        } else {
+            m[firstGroupTitle] = Array.prototype.concat.apply(m[firstGroupTitle], m[title])
+        }
+    }
+}
+
+function get_search_base_list(base) {
+    var dn = ldap.parseDN(base);
+    var is_base_ou = dn.rdns.length > 0 && 'ou' in dn.rdns[0].attrs;
+    if (!is_base_ou) {
+        return [base];
+    }
+    var searchBases = [];
+    var ou_list = get_ou_list(dn);
+    for (var i = 0; i < config.searchBase.length; i++) {
+        var baseDN = ldap.parseDN(config.searchBase[i]);
+        if (is_belong_to(ou_list, baseDN)) {
+            searchBases.push(base);
+            break;
+        }
+        var search_ou_list = get_ou_list(baseDN);
+        if (search_ou_list.length > ou_list.length) {
+            var ok = true;
+            for (var j = 0; j < ou_list.length; j++) {
+                if (search_ou_list[search_ou_list.length - 1 - j] !== ou_list[ou_list.length - 1 - j]) {
+                    ok = false;
+                }
+            }
+            if (ok) {
+                searchBases.push(baseDN.toString())
+            }
+        }
+    }
+    return searchBases;
 }
 
 function base_search() {
@@ -119,11 +164,14 @@ function base_search() {
         attributes: ['uid', 'samaccountname'],
         attrsOnly: true,
     };
-    var base = config.searchBase;
     var entries = [];
     var tmp_usermaps = {};
     var tmp_groupmaps = {};
 
+    var searchCount = 0;
+
+    var searchNext = function (i) {
+        var base = config.searchBase[i];
     client.search(base, opts, function (err, search) {
         assert.ifError(err);
 
@@ -170,18 +218,27 @@ function base_search() {
         });
         search.on('end', function (result) {
             //console.log('status: ' + result.status);
-            if (tmp_usermaps) {
-                groupUserMaps = tmp_groupmaps;
-                merge_group_maps(groupUserMaps, mappingGroupMaps)
-                if (isDebug) {
-                    console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
+            searchCount++;
+            if (searchCount < config.searchBase.length) {
+                searchNext(i + 1);
+            } else {
+                if (tmp_usermaps) {
+                    groupUserMaps = tmp_groupmaps;
+                    merge_group_maps(groupUserMaps, mappingGroupMaps)
+                    if (isDebug) {
+                        console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
+                    }
                 }
-            }
-            if (isDebug) {
-                console.log('entries: ' + entries.length);
+                if (isDebug) {
+                    console.log('entries: ' + entries.length);
+                }
             }
         });
     });
+
+    };
+
+    searchNext(0);
 }
 
 server.bind('', function (req, res, next) {
@@ -391,6 +448,15 @@ server.search('', function (req, res, next) {
         }
     }
 
+
+    var searchCount = 0;
+    var searchBases = get_search_base_list(base);
+    if (searchBases.length <= 0) {
+        res.end();
+        return;
+    }
+    var searchNext = function (i) {
+        var base = searchBases[i];
     client.search(base, opts, function (err, search) {
         if (err) {
             next(err);
@@ -401,7 +467,7 @@ server.search('', function (req, res, next) {
             //console.log('entry: ' + JSON.stringify(entry.object, null, 2));
             //console.log(entry.object);
             var obj = {
-                messageID: res.messageID,
+                //messageID: res.messageID,
                 dn: entry.dn.toString(),
                 attributes: {},
             };
@@ -434,6 +500,7 @@ server.search('', function (req, res, next) {
 
             //entry.messageID = res.messageID;
             if (tmp_usermaps) {
+                // FIXME: sAMAccountName is null
                 var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
                 tmp_usermaps[uid] = obj;
                 add_to_group_maps(obj, dn, tmp_groupmaps);
@@ -474,8 +541,8 @@ server.search('', function (req, res, next) {
             if (!is_uid_filter) {
                 if (!is_group && is_base_ou && (scope === 'sub' || scope === 'one')) {
                     if (mappingUsers && mappingUsers.length > 0) {
-                        for (var i = 0; i < mappingUsers.length; i++) {
-                            var obj = mappingUsers[i]
+                        for (var j = 0; j < mappingUsers.length; j++) {
+                            var obj = mappingUsers[j]
                             var ou_list = get_ou_list(ldap.parseDN(obj.dn))
                             if (scope === 'sub') {
                                 if (is_belong_to(ou_list, req.dn)) {
@@ -489,10 +556,16 @@ server.search('', function (req, res, next) {
                         }
                     }
                 }
+            }
+            searchCount++;
+            if (searchCount < searchBases.length) {
+                searchNext(i + 1);
+            } else {
+            if (!is_uid_filter) {
                 if (tmp_usermaps) {
                     if (mappingUsers && mappingUsers.length > 0) {
-                        for (var i = 0; i < mappingUsers.length; i++) {
-                            var obj = mappingUsers[i]
+                        for (var j = 0; j < mappingUsers.length; j++) {
+                            var obj = mappingUsers[j]
                             var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
                             tmp_usermaps[uid] = obj;
                             add_to_group_maps(obj, ldap.parseDN(obj.dn), tmp_groupmaps)
@@ -509,8 +582,11 @@ server.search('', function (req, res, next) {
                 console.log('entries: ' + entries.length);
             }
             res.end();
+            }
         });
     });
+    };
+    searchNext(0);
 });
 
 server.listen(config.port || 389, function () {
@@ -553,7 +629,7 @@ server.listen(config.port || 389, function () {
                             // only map person
                             return;
                         }
-                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mappingGroup + ', ' + config.searchBase
+                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mappingGroup + ', ' + config.searchBase[0]
                         dn = ldap.parseDN(mapDN)
 
                         entry.attributes.forEach(function (a) {
