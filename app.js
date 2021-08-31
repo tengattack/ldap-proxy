@@ -51,7 +51,8 @@ function get_ou_title(dn) {
 
 function is_belong_to(ou_list, dn) {
     var ous = get_ou_list(dn);
-    if (ous.length <= 0 || ou_list.length <= 0 || ous.length > ou_list.length) {
+    // allow sub ou ['helpdesk', 'it'] belong to root ou []
+    if (ous.length < 0 || ou_list.length <= 0 || ous.length > ou_list.length) {
         return false;
     }
     for (var i = 0; i < ous.length; i++) {
@@ -332,14 +333,14 @@ server.search('', function (req, res, next) {
         console.log('scope: ' + scope);
         console.log('attributes: ' + req.attributes.join());
     }
-    if (scope === 'base' || scope === 'one') {
+    if (scope === 'base' || scope === 'one' || scope === 'sub') {
         for (var i = 0; i < mappingUsers.length; i++) {
             var obj = mappingUsers[i]
             if (obj.dn === base) {
-                if (isDebug) {
-                    console.log('direct send:', obj.dn)
-                }
-                if (scope === 'base') {
+                if (scope === 'base' || scope === 'sub') {
+                    if (isDebug) {
+                        console.log('direct send:', obj.dn)
+                    }
                     res.send(obj);
                     res.end();
                 } else {
@@ -538,6 +539,10 @@ server.search('', function (req, res, next) {
         });
         search.on('end', function (result) {
             //console.log('status: ' + result.status);
+            searchCount++;
+            if (searchCount < searchBases.length) {
+                searchNext(i + 1);
+            } else {
             if (!is_uid_filter) {
                 if (!is_group && is_base_ou && (scope === 'sub' || scope === 'one')) {
                     if (mappingUsers && mappingUsers.length > 0) {
@@ -556,21 +561,7 @@ server.search('', function (req, res, next) {
                         }
                     }
                 }
-            }
-            searchCount++;
-            if (searchCount < searchBases.length) {
-                searchNext(i + 1);
-            } else {
-            if (!is_uid_filter) {
                 if (tmp_usermaps) {
-                    if (mappingUsers && mappingUsers.length > 0) {
-                        for (var j = 0; j < mappingUsers.length; j++) {
-                            var obj = mappingUsers[j]
-                            var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
-                            tmp_usermaps[uid] = obj;
-                            add_to_group_maps(obj, ldap.parseDN(obj.dn), tmp_groupmaps)
-                        }
-                    }
                     groupUserMaps = tmp_groupmaps;
                     merge_group_maps(groupUserMaps, mappingGroupMaps)
                     if (isDebug) {
