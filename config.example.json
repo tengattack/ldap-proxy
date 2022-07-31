@@ -11,7 +11,7 @@
         {
             "sAMAccountName": "user2",
             "searchBase": "ou=special, dc=domain, dc=local",
-            "mappingGroup": "ou=it"
+            "mappingGroup": "ou=it, ou=domain.local"
         }
     ]
 }

@@ -214,7 +214,7 @@ function base_search() {
             //console.log('referral: ' + referral.uris.join());
         });
         search.on('error', function (err) {
-            console.error('error: ' + err.message);
+            console.error('base search error: ' + err.message);
             //process.exit(1)
         });
         search.on('end', function (result) {
@@ -231,7 +231,7 @@ function base_search() {
                     }
                 }
                 if (isDebug) {
-                    console.log('entries: ' + entries.length);
+                    console.log('entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
                 }
             }
         });
@@ -246,9 +246,11 @@ server.bind('', function (req, res, next) {
     //var id = req.id.toString();
     var dn = req.dn.toString();
     var pw = req.credentials;
-    //console.log('id: ' + id);
-    //console.log('bind DN: ' + dn);
-    //console.log('bind PW: ' + pw);
+    if (isDebug) {
+        //console.log('id: ' + id);
+        console.log('bind DN: ' + dn);
+        //console.log('bind PW: ' + pw);
+    }
     if (!pw) {
         return next(new ldap.InvalidCredentialsError());
     }
@@ -403,6 +405,7 @@ server.search('', function (req, res, next) {
     var is_uid_filter = false
 
     var entries = [];
+    var mapping_entries = 0;
 
     var checkpf = function (pf) {
         if (pf.attribute.toLowerCase() === 'samaccountname') {
@@ -414,6 +417,7 @@ server.search('', function (req, res, next) {
                     if (isDebug) {
                         console.log('direct send:', obj.dn)
                     }
+                    mapping_entries++;
                     entries.push(obj);
                     res.send(obj);
                     return true;
@@ -533,12 +537,7 @@ server.search('', function (req, res, next) {
         search.on('searchReference', function (referral) {
             //console.log('referral: ' + referral.uris.join());
         });
-        search.on('error', function (err) {
-            console.error('error: ' + err.message);
-            next(err);
-        });
-        search.on('end', function (result) {
-            //console.log('status: ' + result.status);
+        var onNext = function () {
             searchCount++;
             if (searchCount < searchBases.length) {
                 searchNext(i + 1);
@@ -551,10 +550,14 @@ server.search('', function (req, res, next) {
                             var ou_list = get_ou_list(ldap.parseDN(obj.dn))
                             if (scope === 'sub') {
                                 if (is_belong_to(ou_list, req.dn)) {
+                                    mapping_entries++
+                                    entries.push(obj)
                                     res.send(obj)
                                 }
                             } else {
                                 if (is_same_group(ou_list, req.dn)) {
+                                    mapping_entries++
+                                    entries.push(obj)
                                     res.send(obj)
                                 }
                             }
@@ -570,10 +573,17 @@ server.search('', function (req, res, next) {
                 }
             }
             if (isDebug) {
-                console.log('entries: ' + entries.length);
+                console.log('entries: ' + entries.length + ', mapping: ' + mapping_entries);
             }
             res.end();
             }
+        }
+        search.on('error', function (err) {
+            console.error('search error: ' + err.message);
+            onNext();
+        });
+        search.on('end', function (result) {
+            onNext();
         });
     });
     };
@@ -620,7 +630,7 @@ server.listen(config.port || 389, function () {
                             // only map person
                             return;
                         }
-                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mappingGroup + ', ' + config.searchBase[0]
+                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mappingGroup
                         dn = ldap.parseDN(mapDN)
 
                         entry.attributes.forEach(function (a) {
@@ -648,7 +658,7 @@ server.listen(config.port || 389, function () {
                         //console.log('referral: ' + referral.uris.join());
                     });
                     search.on('error', function (err) {
-                        console.error('error: ' + err.message);
+                        console.error('mapping search error: ' + err.message);
                         //process.exit(1)
                     });
                     search.on('end', function (result) {
