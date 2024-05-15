@@ -7,11 +7,11 @@
         "bindDN": "ldap",
         "bindPW": "passwd"
     },
-    "mappingUsers": [
-        {
-            "sAMAccountName": "user2",
-            "searchBase": "ou=special, dc=domain, dc=local",
-            "mappingGroup": "ou=it, ou=domain.local"
-        }
-    ]
+    "mysql": {
+        "connectionLimit": 10,
+        "host": "example.org",
+        "user": "bob",
+        "password": "secret",
+        "database": "my_db"
+    }
 }

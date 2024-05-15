@@ -2,6 +2,10 @@
 var assert = require('assert');
 var ldap = require('ldapjs');
 var fs = require('fs');
+var mysql = require('mysql');
+
+var USER_STATUS_DEFAULT = 0
+var USER_STATUS_NOT_FOUND = -1
 
 var config = JSON.parse(fs.readFileSync('config.json').toString());
 var groupMaps = {};
@@ -17,10 +21,13 @@ for (var i = 2; i < process.argv.length; i++) {
     }
 }
 
+var dbPool = mysql.createPool(config.mysql);
+
 var server = ldap.createServer();
 var client = ldap.createClient({
     url: config.server.url
 });
+var clientCallbacks = {}
 
 function get_ou_list(dn) {
     var ous = [];
@@ -145,7 +152,7 @@ function get_search_base_list(base) {
     return searchBases;
 }
 
-function base_search() {
+function baseSearchInitAll(callback) {
 
     // TODO: bootstrap
     // base: ou=it, ou=domian.local, dc=domain, dc=local
@@ -158,6 +165,30 @@ function base_search() {
     // filter: (objectclass=organizationalunit)
     // scope: sub
     // attributes: dn,cn,cn,description
+
+    var done = false
+
+    var initDone = function () {
+        done = true
+        clientCallbacks.onend = null
+        clientCallbacks.onerror = null
+        callback()
+    }
+    clientCallbacks.onend = function () {
+        var err = new Error('client unexpected end')
+        if (!done) {
+            callback(err)
+            return
+        }
+        assert.ifError(err)
+    }
+    clientCallbacks.onerror = function (err) {
+        if (!done) {
+            callback(err)
+            return
+        }
+        assert.ifError(err)
+    }
 
     var opts = {
         filter: '(objectclass=organizationalperson)',
@@ -174,7 +205,13 @@ function base_search() {
     var searchNext = function (i) {
         var base = config.searchBase[i];
     client.search(base, opts, function (err, search) {
-        assert.ifError(err);
+        if (err) {
+            if (!done) {
+                callback(err)
+                return
+            }
+            assert.ifError(err)
+        }
 
         search.on('searchEntry', function (entry) {
             //console.log('entry: ' + JSON.stringify(entry.object, null, 2));
@@ -230,9 +267,8 @@ function base_search() {
                         console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
                     }
                 }
-                if (isDebug) {
-                    console.log('entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
-                }
+                console.log('all user entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
+                initDone()
             }
         });
     });
@@ -590,35 +626,83 @@ server.search('', function (req, res, next) {
     searchNext(0);
 });
 
-server.listen(config.port || 389, function () {
-    console.log('LDAP server listening at %s', server.url);
+function startServer() {
+    clientCallbacks.onend = function () {
+        console.error('client unexpected end')
+        process.exit(1)
+    }
+    clientCallbacks.onerror = function (err) {
+        console.error('client error: ' + err)
+        process.exit(1)
+    }
+
+    server.listen(config.port || 389, function () {
+        console.log('LDAP server listening at %s', server.url);
+    });
+}
+
+function startupInitWithMappingUsers(configUsers, isUid, onUserStatus, callback) {
+    var done = false
+
+    var initDone = function () {
+        done = true
+        clientCallbacks.onend = null
+        clientCallbacks.onerror = null
+        callback()
+    }
+    clientCallbacks.onend = function () {
+        var err = new Error('client unexpected end')
+        if (!done) {
+            callback(err)
+            return
+        }
+        assert.ifError(err)
+    }
+    clientCallbacks.onerror = function (err) {
+        if (!done) {
+            callback(err)
+            return
+        }
+        assert.ifError(err)
+    }
+
     client.bind(config.server.bindDN, config.server.bindPW, function (err) {
         if (err) {
-            console.error('client bind error: ' + err);
-            return;
+            if (!done) {
+                callback(err);
+                return;
+            }
+            assert.ifError(err)
         }
 
         console.log('client bind successful');
 
-        if (config.mappingUsers && config.mappingUsers.length > 0) {
+        if (configUsers && configUsers.length > 0) {
             var counter = 0
-            config.mappingUsers.forEach(function (user) {
+            configUsers.forEach(function (user) {
                 var opts = {
                     filter: '(&(objectclass=organizationalperson)',
                     scope: 'sub',
                 };
-                if (user.uid) {
-                    opts.filter += '(uid=' + user.uid + '))';
-                } else if (user.sAMAccountName) {
-                    opts.filter += '(sAMAccountName=' + user.sAMAccountName + '))';
+                if (isUid) {
+                    opts.filter += '(uid=' + user.account_name + '))';
+                } else {
+                    opts.filter += '(sAMAccountName=' + user.account_name + '))';
                 }
 
                 var tmp_groupmaps = []
                 var tmp_mapping_users = []
                 var tmp_mapping_user_dns = {}
+                var found = false
 
-                client.search(user.searchBase, opts, function (err, search) {
-                    assert.ifError(err);
+                client.search(user.search_base, opts, function (err, search) {
+                    if (err) {
+                        if (!done) {
+                            callback(err);
+                            return;
+                        }
+                        assert.ifError(err)
+                    }
 
                     search.on('searchEntry', function (entry) {
                         var obj = {
@@ -630,7 +714,7 @@ server.listen(config.port || 389, function () {
                             // only map person
                             return;
                         }
-                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mappingGroup
+                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mapping_group
                         dn = ldap.parseDN(mapDN)
 
                         entry.attributes.forEach(function (a) {
@@ -653,6 +737,7 @@ server.listen(config.port || 389, function () {
                         add_to_group_maps(obj, dn, tmp_groupmaps);
 
                         tmp_mapping_users.push(obj);
+                        found = true
                     });
                     search.on('searchReference', function (referral) {
                         //console.log('referral: ' + referral.uris.join());
@@ -662,6 +747,9 @@ server.listen(config.port || 389, function () {
                         //process.exit(1)
                     });
                     search.on('end', function (result) {
+                        if (!found) {
+                            onUserStatus(user, USER_STATUS_NOT_FOUND)
+                        }
                         if (counter === 0) {
                             mappingUsers = tmp_mapping_users;
                             mappingGroupMaps = tmp_groupmaps;
@@ -672,22 +760,89 @@ server.listen(config.port || 389, function () {
                             mappingUserDNs = Object.assign(mappingUserDNs, tmp_mapping_user_dns)
                         }
                         counter++
-                        if (counter >= config.mappingUsers.length) {
-                            base_search()
+                        if (counter >= configUsers.length) {
+                            initDone()
                         }
                     });
                 })
             })
         } else {
-            base_search()
+            initDone()
         }
-
     });
+}
+
+function main() {
     client.on('end', function () {
-        process.exit();
+        if (clientCallbacks.onend) {
+            clientCallbacks.onend()
+        }
     });
     client.on('error', function (err) {
-        console.error('client error: ' + err)
-        process.exit(1);
+        if (clientCallbacks.onerror) {
+            clientCallbacks.onerror(err)
+        }
     });
-});
+
+    dbPool.getConnection(function (err, connection) {
+        if (err) {
+            console.error('db connect error: ' + err)
+            process.exit(1)
+        }
+
+        connection.query('SELECT id, account_name, search_base, mapping_group, status FROM lp_mapping_users WHERE delete_time = 0 AND status = ?', [USER_STATUS_DEFAULT], function (err, results) {
+            connection.release()
+            if (err) {
+                console.error('db query error: ' + err)
+                process.exit(1)
+            }
+
+            console.log('mapping users count: ' + results.length)
+
+            var notFoundUserIds = []
+
+            startupInitWithMappingUsers(results, false, function (user, status) {
+                if (status === USER_STATUS_NOT_FOUND) {
+                    // user not found
+                    console.log('user ' + user.account_name + ' not found!')
+                    notFoundUserIds.push(user.id)
+                }
+            }, function (err) {
+                if (err) {
+                    console.error('ldap client startup init error: ' + err)
+                    process.exit(1)
+                }
+
+                if (notFoundUserIds.length > 0) {
+                    // async
+                    dbPool.getConnection(function(err, connection) {
+                        if (err) {
+                            console.error('db connect error: ' + err)
+                            return
+                        }
+                        connection.query('UPDATE lp_mapping_users SET status = ?, modified_time = ? WHERE id IN (?)',
+                            [USER_STATUS_NOT_FOUND, Math.floor(Date.now() / 1000), notFoundUserIds],
+                            function (err) {
+                                connection.release()
+                                if (err) {
+                                    console.error('update not found users status error: ' + err)
+                                    // PASS
+                                }
+                            })
+                    })
+                }
+
+                baseSearchInitAll(function (err) {
+                    if (err) {
+                        console.error('base search error: ' + err)
+                        process.exit(1)
+                    }
+
+                    startServer()
+                })
+            })
+        })
+    })
+}
+
+main()
