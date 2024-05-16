@@ -12,5 +12,15 @@
         "user": "bob",
         "password": "secret",
         "database": "my_db"
-    }
+    },
+    "searchBases": [
+        { "search_base": "ou=domain.local, dc=domain, dc=local" }
+    ],
+    "mappingUsers": [
+        {
+            "account_name": "user2",
+            "search_base": "ou=special, dc=domain, dc=local",
+            "mapping_group": "ou=it, ou=domain.local"
+        }
+    ]
 }

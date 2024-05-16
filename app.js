@@ -22,7 +22,7 @@ for (var i = 2; i < process.argv.length; i++) {
     }
 }
 
-var dbPool = mysql.createPool(config.mysql);
+var dbPool = config.mysql ? mysql.createPool(config.mysql) : null;
 
 var server = ldap.createServer();
 var client = ldap.createClient({
@@ -266,6 +266,7 @@ function baseSearchInitAll(configSearchBaseResults, callback) {
                     merge_group_maps(groupUserMaps, mappingGroupMaps)
                     if (isDebug) {
                         console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
+                        console.log('groups:', Object.keys(tmp_groupmaps).sort())
                     }
                 }
                 console.log('all user entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
@@ -775,6 +776,10 @@ function startupInitWithMappingUsers(configUsers, isUid, onUserStatus, callback)
 
 function queryDb(sql, values) {
     return new Promise(function (resolve, reject) {
+        if (!dbPool) {
+            reject(new Error('no mysql db configured'))
+            return
+        }
         dbPool.getConnection(function (err, connection) {
             if (err) {
                 reject(err)
@@ -813,9 +818,11 @@ async function main() {
     try {
         res1 = await queryDb('SELECT id, account_name, search_base, mapping_group, status FROM lp_mapping_users WHERE delete_time = 0 AND status = ?', [STATUS_DEFAULT])
         res2 = await queryDb('SELECT id, search_base, status FROM lp_search_bases WHERE delete_time = 0 AND status = ?', [STATUS_DEFAULT])
-    } catch (e) {
-        console.error('db query error: ' + err)
-        process.exit(1)
+    } catch (err) {
+        console.warn('db query error: ' + err + ', fallback to local config')
+        // PASS
+        res1 = { results: config.mappingUsers }
+        res2 = { results: config.searchBases }
     }
 
     console.log('mapping users count: ' + res1.results.length)
@@ -827,7 +834,9 @@ async function main() {
         if (status === STATUS_NOT_FOUND) {
             // user not found
             console.log('user ' + user.account_name + ' not found!')
-            notFoundUserIds.push(user.id)
+            if (user.id) {
+                notFoundUserIds.push(user.id)
+            }
         }
     }, function (err) {
         if (err) {
