@@ -10,3 +10,14 @@ CREATE TABLE IF NOT EXISTS lp_mapping_users (
     PRIMARY KEY (`id`),
     UNIQUE idx_accountname_deletetime (account_name, delete_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+CREATE TABLE IF NOT EXISTS lp_search_bases (
+    `id` bigint NOT NULL AUTO_INCREMENT COMMENT 'ID',
+    `create_time` bigint NOT NULL DEFAULT '0' COMMENT 'Create Time (UNIX)',
+    `modified_time` bigint NOT NULL DEFAULT '0' COMMENT 'Modified Time (UNIX)',
+    `delete_time` bigint NOT NULL DEFAULT '0' COMMENT 'Delete Time (UNIX)',
+    `search_base` varchar(255) NOT NULL,
+    `status` tinyint NOT NULL DEFAULT '0',
+    PRIMARY KEY (`id`),
+    UNIQUE idx_searchbase_deletetime (search_base, delete_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;

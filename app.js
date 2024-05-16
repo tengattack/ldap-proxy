@@ -4,10 +4,11 @@ var ldap = require('ldapjs');
 var fs = require('fs');
 var mysql = require('mysql');
 
-var USER_STATUS_DEFAULT = 0
-var USER_STATUS_NOT_FOUND = -1
+var STATUS_DEFAULT = 0
+var STATUS_NOT_FOUND = -1
 
 var config = JSON.parse(fs.readFileSync('config.json').toString());
+var configSearchBases = []
 var groupMaps = {};
 var groupUserMaps = null;
 var mappingUsers = [];
@@ -130,8 +131,8 @@ function get_search_base_list(base) {
     }
     var searchBases = [];
     var ou_list = get_ou_list(dn);
-    for (var i = 0; i < config.searchBase.length; i++) {
-        var baseDN = ldap.parseDN(config.searchBase[i]);
+    for (var i = 0; i < configSearchBases.length; i++) {
+        var baseDN = ldap.parseDN(configSearchBases[i].search_base);
         if (is_belong_to(ou_list, baseDN)) {
             searchBases.push(base);
             break;
@@ -152,7 +153,7 @@ function get_search_base_list(base) {
     return searchBases;
 }
 
-function baseSearchInitAll(callback) {
+function baseSearchInitAll(configSearchBaseResults, callback) {
 
     // TODO: bootstrap
     // base: ou=it, ou=domian.local, dc=domain, dc=local
@@ -166,7 +167,7 @@ function baseSearchInitAll(callback) {
     // scope: sub
     // attributes: dn,cn,cn,description
 
-    var done = false
+    configSearchBases = configSearchBaseResults
 
     var initDone = function () {
         done = true
@@ -203,7 +204,7 @@ function baseSearchInitAll(callback) {
     var searchCount = 0;
 
     var searchNext = function (i) {
-        var base = config.searchBase[i];
+        var base = configSearchBases[i].search_base;
     client.search(base, opts, function (err, search) {
         if (err) {
             if (!done) {
@@ -257,7 +258,7 @@ function baseSearchInitAll(callback) {
         search.on('end', function (result) {
             //console.log('status: ' + result.status);
             searchCount++;
-            if (searchCount < config.searchBase.length) {
+            if (searchCount < configSearchBases.length) {
                 searchNext(i + 1);
             } else {
                 if (tmp_usermaps) {
@@ -748,7 +749,7 @@ function startupInitWithMappingUsers(configUsers, isUid, onUserStatus, callback)
                     });
                     search.on('end', function (result) {
                         if (!found) {
-                            onUserStatus(user, USER_STATUS_NOT_FOUND)
+                            onUserStatus(user, STATUS_NOT_FOUND)
                         }
                         if (counter === 0) {
                             mappingUsers = tmp_mapping_users;
@@ -772,7 +773,31 @@ function startupInitWithMappingUsers(configUsers, isUid, onUserStatus, callback)
     });
 }
 
-function main() {
+function queryDb(sql, values) {
+    return new Promise(function (resolve, reject) {
+        dbPool.getConnection(function (err, connection) {
+            if (err) {
+                reject(err)
+                return
+            }
+            connection.query(sql, values, function (err, results) {
+                connection.release()
+                if (err) {
+                    reject(err)
+                    return
+                }
+                resolve({ results })
+            })
+        })
+    })
+}
+
+async function updateUsersStatus(userIds, status) {
+    return await queryDb('UPDATE lp_mapping_users SET status = ?, modified_time = ? WHERE id IN (?) AND delete_time = 0',
+        [status, Math.floor(Date.now() / 1000), userIds])
+}
+
+async function main() {
     client.on('end', function () {
         if (clientCallbacks.onend) {
             clientCallbacks.onend()
@@ -784,65 +809,53 @@ function main() {
         }
     });
 
-    dbPool.getConnection(function (err, connection) {
+    let res1, res2
+    try {
+        res1 = await queryDb('SELECT id, account_name, search_base, mapping_group, status FROM lp_mapping_users WHERE delete_time = 0 AND status = ?', [STATUS_DEFAULT])
+        res2 = await queryDb('SELECT id, search_base, status FROM lp_search_bases WHERE delete_time = 0 AND status = ?', [STATUS_DEFAULT])
+    } catch (e) {
+        console.error('db query error: ' + err)
+        process.exit(1)
+    }
+
+    console.log('mapping users count: ' + res1.results.length)
+    console.log('search bases count: ' + res2.results.length)
+
+    var notFoundUserIds = []
+
+    startupInitWithMappingUsers(res1.results, false, function (user, status) {
+        if (status === STATUS_NOT_FOUND) {
+            // user not found
+            console.log('user ' + user.account_name + ' not found!')
+            notFoundUserIds.push(user.id)
+        }
+    }, function (err) {
         if (err) {
-            console.error('db connect error: ' + err)
+            console.error('ldap client startup init error: ' + err)
             process.exit(1)
         }
 
-        connection.query('SELECT id, account_name, search_base, mapping_group, status FROM lp_mapping_users WHERE delete_time = 0 AND status = ?', [USER_STATUS_DEFAULT], function (err, results) {
-            connection.release()
+        if (notFoundUserIds.length > 0) {
+            // async
+            updateUsersStatus(notFoundUserIds, STATUS_NOT_FOUND)
+                .catch(function (err) {
+                    console.error('update not found users status error: ' + err)
+                    // PASS
+                })
+        }
+
+        baseSearchInitAll(res2.results, function (err) {
             if (err) {
-                console.error('db query error: ' + err)
+                console.error('base search error: ' + err)
                 process.exit(1)
             }
 
-            console.log('mapping users count: ' + results.length)
-
-            var notFoundUserIds = []
-
-            startupInitWithMappingUsers(results, false, function (user, status) {
-                if (status === USER_STATUS_NOT_FOUND) {
-                    // user not found
-                    console.log('user ' + user.account_name + ' not found!')
-                    notFoundUserIds.push(user.id)
-                }
-            }, function (err) {
-                if (err) {
-                    console.error('ldap client startup init error: ' + err)
-                    process.exit(1)
-                }
-
-                if (notFoundUserIds.length > 0) {
-                    // async
-                    dbPool.getConnection(function(err, connection) {
-                        if (err) {
-                            console.error('db connect error: ' + err)
-                            return
-                        }
-                        connection.query('UPDATE lp_mapping_users SET status = ?, modified_time = ? WHERE id IN (?)',
-                            [USER_STATUS_NOT_FOUND, Math.floor(Date.now() / 1000), notFoundUserIds],
-                            function (err) {
-                                connection.release()
-                                if (err) {
-                                    console.error('update not found users status error: ' + err)
-                                    // PASS
-                                }
-                            })
-                    })
-                }
-
-                baseSearchInitAll(function (err) {
-                    if (err) {
-                        console.error('base search error: ' + err)
-                        process.exit(1)
-                    }
-
-                    startServer()
-                })
-            })
+            startServer()
         })
     })
 }
 
-main()
+main().catch(function (err) {
+    console.error(err)
+    process.exit(1)
+})
