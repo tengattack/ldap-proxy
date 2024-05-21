@@ -3,6 +3,7 @@ var assert = require('assert');
 var ldap = require('ldapjs');
 var fs = require('fs');
 var mysql = require('mysql');
+var ldapClient = require('./ldap-client')
 
 var STATUS_DEFAULT = 0
 var STATUS_NOT_FOUND = -1
@@ -23,12 +24,11 @@ for (var i = 2; i < process.argv.length; i++) {
 }
 
 var dbPool = config.mysql ? mysql.createPool(config.mysql) : null;
-
-var server = ldap.createServer();
-var client = ldap.createClient({
+var ldapClientPool = ldapClient.createPool({
     url: config.server.url
 });
-var clientCallbacks = {}
+
+var server = ldap.createServer();
 
 function get_ou_list(dn) {
     var ous = [];
@@ -169,26 +169,17 @@ function baseSearchInitAll(configSearchBaseResults, callback) {
 
     configSearchBases = configSearchBaseResults
 
-    var initDone = function () {
-        done = true
-        clientCallbacks.onend = null
-        clientCallbacks.onerror = null
-        callback()
-    }
-    clientCallbacks.onend = function () {
-        var err = new Error('client unexpected end')
+    var done = false
+    var initDone = function (client, err) {
         if (!done) {
+            done = true
+            if (client) {
+                client.release()
+            }
             callback(err)
             return
         }
-        assert.ifError(err)
-    }
-    clientCallbacks.onerror = function (err) {
-        if (!done) {
-            callback(err)
-            return
-        }
-        assert.ifError(err)
+        assert.ifError(err ? err : new Error('unexpected done'))
     }
 
     var opts = {
@@ -202,82 +193,88 @@ function baseSearchInitAll(configSearchBaseResults, callback) {
     var tmp_groupmaps = {};
 
     var searchCount = 0;
-
-    var searchNext = function (i) {
+    var searchNext = function (client, i) {
         var base = configSearchBases[i].search_base;
-    client.search(base, opts, function (err, search) {
-        if (err) {
-            if (!done) {
-                callback(err)
+        client.search(base, opts, function (err, search) {
+            if (err) {
+                initDone(client, err)
                 return
             }
-            assert.ifError(err)
-        }
 
-        search.on('searchEntry', function (entry) {
-            //console.log('entry: ' + JSON.stringify(entry.object, null, 2));
-            //console.log(entry.object);
-            var obj = {
-                //messageID: res.messageID,
-                dn: entry.dn.toString(),
-                attributes: {},
-            };
-            var dn = ldap.parseDN(obj.dn);
-            /*if (search_ous && !is_belong_to(search_ous, dn)) {
-                if (isDebug) {
-                    console.log('!isbelongto', obj.dn, search_ous)
-                }
-                // ignore
-                return;
-            }*/
-            entry.attributes.forEach(function (a) {
-                obj.attributes[a.type] = a._vals;
-                //obj.attributes.push(a.json || a);
-            });
-            if (!obj.attributes.uid && obj.attributes.sAMAccountName) {
-                obj.attributes.uid = obj.attributes.sAMAccountName;
-            }
-            var memberOf = obj.attributes.memberOf || [];
-            obj.attributes.memberOf = Array.prototype.concat.apply(memberOf, get_ou_titles(dn));
-
-            //entry.messageID = res.messageID;
-            if (tmp_usermaps) {
-                var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
-                tmp_usermaps[uid] = obj;
-                add_to_group_maps(obj, dn, tmp_groupmaps);
-            }
-            entries.push(obj);
-        });
-        search.on('searchReference', function (referral) {
-            //console.log('referral: ' + referral.uris.join());
-        });
-        search.on('error', function (err) {
-            console.error('base search error: ' + err.message);
-            //process.exit(1)
-        });
-        search.on('end', function (result) {
-            //console.log('status: ' + result.status);
-            searchCount++;
-            if (searchCount < configSearchBases.length) {
-                searchNext(i + 1);
-            } else {
-                if (tmp_usermaps) {
-                    groupUserMaps = tmp_groupmaps;
-                    merge_group_maps(groupUserMaps, mappingGroupMaps)
+            search.on('searchEntry', function (entry) {
+                //console.log('entry: ' + JSON.stringify(entry.object, null, 2));
+                //console.log(entry.object);
+                var obj = {
+                    //messageID: res.messageID,
+                    dn: entry.dn.toString(),
+                    attributes: {},
+                };
+                var dn = ldap.parseDN(obj.dn);
+                /*if (search_ous && !is_belong_to(search_ous, dn)) {
                     if (isDebug) {
-                        console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
-                        console.log('groups:', Object.keys(tmp_groupmaps).sort())
+                        console.log('!isbelongto', obj.dn, search_ous)
                     }
+                    // ignore
+                    return;
+                }*/
+                entry.attributes.forEach(function (a) {
+                    obj.attributes[a.type] = a._vals;
+                    //obj.attributes.push(a.json || a);
+                });
+                if (!obj.attributes.uid && obj.attributes.sAMAccountName) {
+                    obj.attributes.uid = obj.attributes.sAMAccountName;
                 }
-                console.log('all user entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
-                initDone()
-            }
+                var memberOf = obj.attributes.memberOf || [];
+                obj.attributes.memberOf = Array.prototype.concat.apply(memberOf, get_ou_titles(dn));
+
+                //entry.messageID = res.messageID;
+                if (tmp_usermaps) {
+                    var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
+                    tmp_usermaps[uid] = obj;
+                    add_to_group_maps(obj, dn, tmp_groupmaps);
+                }
+                entries.push(obj);
+            });
+            search.on('searchReference', function (referral) {
+                //console.log('referral: ' + referral.uris.join());
+            });
+            search.on('error', function (err) {
+                console.error('base search error: ' + err.message);
+                //process.exit(1)
+            });
+            search.on('end', function (result) {
+                //console.log('status: ' + result.status);
+                searchCount++;
+                if (searchCount < configSearchBases.length) {
+                    searchNext(client, i + 1);
+                } else {
+                    if (tmp_usermaps) {
+                        groupUserMaps = tmp_groupmaps;
+                        merge_group_maps(groupUserMaps, mappingGroupMaps)
+                        if (isDebug) {
+                            console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
+                            console.log('groups:', Object.keys(tmp_groupmaps).sort())
+                        }
+                    }
+                    console.log('all user entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
+                    initDone(client)
+                }
+            });
         });
-    });
 
     };
 
-    searchNext(0);
+    ldapClientPool.getClient({
+        dn: config.server.bindDN,
+        password: config.server.bindPW,
+    }, {
+        onbind: function () {
+            searchNext(this, 0);
+        },
+        onerror: function (err) {
+            initDone(null, err)
+        },
+    })
 }
 
 server.bind('', function (req, res, next) {
@@ -316,7 +313,9 @@ server.bind('', function (req, res, next) {
         }
     }
     client2.bind(dn, pw, function (err) {
-        client2.unbind(function (err) {});
+        client2.unbind(function (err) {
+            client2.destroy()
+        });
         if (err) {
             console.log('client2 bind error: ' + err);
             next(err);
@@ -491,153 +490,172 @@ server.search('', function (req, res, next) {
         }
     }
 
-
-    var searchCount = 0;
     var searchBases = get_search_base_list(base);
     if (searchBases.length <= 0) {
         res.end();
         return;
     }
-    var searchNext = function (i) {
-        var base = searchBases[i];
-    client.search(base, opts, function (err, search) {
-        if (err) {
-            next(err);
-            return;
-        }
 
-        search.on('searchEntry', function (entry) {
-            //console.log('entry: ' + JSON.stringify(entry.object, null, 2));
-            //console.log(entry.object);
-            var obj = {
-                //messageID: res.messageID,
-                dn: entry.dn.toString(),
-                attributes: {},
-            };
-            var dn = ldap.parseDN(obj.dn);
-            if (search_ous && !is_belong_to(search_ous, dn)) {
-                if (isDebug) {
-                    console.log('!isbelongto', obj.dn, search_ous)
-                }
-                // ignore
+    var done = false
+    var searchDone = function (client, err) {
+        if (!done) {
+            done = true
+            if (client) {
+                client.release()
+            }
+            if (err) {
+                next(err)
+            } else {
+                res.end()
+            }
+            return
+        }
+        assert.ifError(err ? err : new Error('unexpected done'))
+    }
+
+    var searchCount = 0;
+    var searchNext = function (client, i) {
+        var base = searchBases[i];
+        client.search(base, opts, function (err, search) {
+            if (err) {
+                searchDone(client, err);
                 return;
             }
-            entry.attributes.forEach(function (a) {
-                obj.attributes[a.type] = a._vals;
-                //obj.attributes.push(a.json || a);
-            });
-            if (!obj.attributes.uid && obj.attributes.sAMAccountName) {
-                obj.attributes.uid = obj.attributes.sAMAccountName;
-            }
-            if (obj.attributes.ou) {
-                var ou_title = get_ou_title(dn);
-                // remap to ou full name
-                obj.attributes.cn = obj.attributes.ou = [ou_title];
-                if (!obj.attributes.description) {
-                    obj.attributes.description = obj.attributes.ou
-                }
-            } else {
-                var memberOf = obj.attributes.memberOf || [];
-                obj.attributes.memberOf = Array.prototype.concat.apply(memberOf, get_ou_titles(dn));
-            }
 
-            //entry.messageID = res.messageID;
-            if (tmp_usermaps) {
-                // FIXME: sAMAccountName is null
-                var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
-                tmp_usermaps[uid] = obj;
-                add_to_group_maps(obj, dn, tmp_groupmaps);
-            }
-            if (is_group && groupUserMaps) {
-                var ou_title = get_ou_title(dn);
-                // base: ou=it, ou=domain.local, dc=domain, dc=local
-                // filter: (&(objectclass=organizationalunit)(cn=helpdesk))
-                // scope: sub
-                // attributes: member,objectguid,cn
-                var members = [];
-                if (ou_title in groupUserMaps) {
-                    var users = groupUserMaps[ou_title];
-                    for (var i = 0; i < users.length; i++) {
-                        members.push(users[i].dn);
+            search.on('searchEntry', function (entry) {
+                //console.log('entry: ' + JSON.stringify(entry.object, null, 2));
+                //console.log(entry.object);
+                var obj = {
+                    //messageID: res.messageID,
+                    dn: entry.dn.toString(),
+                    attributes: {},
+                };
+                var dn = ldap.parseDN(obj.dn);
+                if (search_ous && !is_belong_to(search_ous, dn)) {
+                    if (isDebug) {
+                        console.log('!isbelongto', obj.dn, search_ous)
+                    }
+                    // ignore
+                    return;
+                }
+                entry.attributes.forEach(function (a) {
+                    obj.attributes[a.type] = a._vals;
+                    //obj.attributes.push(a.json || a);
+                });
+                if (!obj.attributes.uid && obj.attributes.sAMAccountName) {
+                    obj.attributes.uid = obj.attributes.sAMAccountName;
+                }
+                if (obj.attributes.ou) {
+                    var ou_title = get_ou_title(dn);
+                    // remap to ou full name
+                    obj.attributes.cn = obj.attributes.ou = [ou_title];
+                    if (!obj.attributes.description) {
+                        obj.attributes.description = obj.attributes.ou
+                    }
+                } else {
+                    var memberOf = obj.attributes.memberOf || [];
+                    obj.attributes.memberOf = Array.prototype.concat.apply(memberOf, get_ou_titles(dn));
+                }
+
+                //entry.messageID = res.messageID;
+                if (tmp_usermaps) {
+                    // FIXME: sAMAccountName is null
+                    var uid = obj.attributes.sAMAccountName[0].toString('utf-8')
+                    tmp_usermaps[uid] = obj;
+                    add_to_group_maps(obj, dn, tmp_groupmaps);
+                }
+                if (is_group && groupUserMaps) {
+                    var ou_title = get_ou_title(dn);
+                    // base: ou=it, ou=domain.local, dc=domain, dc=local
+                    // filter: (&(objectclass=organizationalunit)(cn=helpdesk))
+                    // scope: sub
+                    // attributes: member,objectguid,cn
+                    var members = [];
+                    if (ou_title in groupUserMaps) {
+                        var users = groupUserMaps[ou_title];
+                        for (var i = 0; i < users.length; i++) {
+                            members.push(users[i].dn);
+                        }
+                    }
+                    if (members.length > 0) {
+                        obj.attributes.member = members;
+                    }
+                    groupMaps[ou_title] = obj;
+                    if (isDebug) {
+                        console.log(ou_title, members.map(m => m.toString('utf-8')))
                     }
                 }
-                if (members.length > 0) {
-                    obj.attributes.member = members;
+                entries.push(obj);
+                res.send(obj);
+            });
+            search.on('searchReference', function (referral) {
+                //console.log('referral: ' + referral.uris.join());
+            });
+            var onNext = function () {
+                searchCount++;
+                if (searchCount < searchBases.length) {
+                    searchNext(client, i + 1);
+                    return
                 }
-                groupMaps[ou_title] = obj;
-                if (isDebug) {
-                    console.log(ou_title, members.map(m => m.toString('utf-8')))
-                }
-            }
-            entries.push(obj);
-            res.send(obj);
-        });
-        search.on('searchReference', function (referral) {
-            //console.log('referral: ' + referral.uris.join());
-        });
-        var onNext = function () {
-            searchCount++;
-            if (searchCount < searchBases.length) {
-                searchNext(i + 1);
-            } else {
-            if (!is_uid_filter) {
-                if (!is_group && is_base_ou && (scope === 'sub' || scope === 'one')) {
-                    if (mappingUsers && mappingUsers.length > 0) {
-                        for (var j = 0; j < mappingUsers.length; j++) {
-                            var obj = mappingUsers[j]
-                            var ou_list = get_ou_list(ldap.parseDN(obj.dn))
-                            if (scope === 'sub') {
-                                if (is_belong_to(ou_list, req.dn)) {
-                                    mapping_entries++
-                                    entries.push(obj)
-                                    res.send(obj)
-                                }
-                            } else {
-                                if (is_same_group(ou_list, req.dn)) {
-                                    mapping_entries++
-                                    entries.push(obj)
-                                    res.send(obj)
+                if (!is_uid_filter) {
+                    if (!is_group && is_base_ou && (scope === 'sub' || scope === 'one')) {
+                        if (mappingUsers && mappingUsers.length > 0) {
+                            for (var j = 0; j < mappingUsers.length; j++) {
+                                var obj = mappingUsers[j]
+                                var ou_list = get_ou_list(ldap.parseDN(obj.dn))
+                                if (scope === 'sub') {
+                                    if (is_belong_to(ou_list, req.dn)) {
+                                        mapping_entries++
+                                        entries.push(obj)
+                                        res.send(obj)
+                                    }
+                                } else {
+                                    if (is_same_group(ou_list, req.dn)) {
+                                        mapping_entries++
+                                        entries.push(obj)
+                                        res.send(obj)
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if (tmp_usermaps) {
-                    groupUserMaps = tmp_groupmaps;
-                    merge_group_maps(groupUserMaps, mappingGroupMaps)
-                    if (isDebug) {
-                        console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
+                    if (tmp_usermaps) {
+                        groupUserMaps = tmp_groupmaps;
+                        merge_group_maps(groupUserMaps, mappingGroupMaps)
+                        if (isDebug) {
+                            console.log('got user entries: ' + Object.keys(tmp_usermaps).length + ' group: ' + Object.keys(tmp_groupmaps).length)
+                        }
                     }
                 }
+                if (isDebug) {
+                    console.log('entries: ' + entries.length + ', mapping: ' + mapping_entries);
+                }
+                searchDone(client);
             }
-            if (isDebug) {
-                console.log('entries: ' + entries.length + ', mapping: ' + mapping_entries);
-            }
-            res.end();
-            }
-        }
-        search.on('error', function (err) {
-            console.error('search error: ' + err.message);
-            onNext();
+            search.on('error', function (err) {
+                console.error('search error: ' + err.message);
+                onNext();
+            });
+            search.on('end', function (result) {
+                onNext();
+            });
         });
-        search.on('end', function (result) {
-            onNext();
-        });
-    });
     };
-    searchNext(0);
+
+    ldapClientPool.getClient({
+        dn: config.server.bindDN,
+        password: config.server.bindPW,
+    }, {
+        onbind: function () {
+            searchNext(this, 0)
+        },
+        onerror: function (err) {
+            searchDone(null, err)
+        },
+    })
 });
 
 function startServer() {
-    clientCallbacks.onend = function () {
-        console.error('client unexpected end')
-        process.exit(1)
-    }
-    clientCallbacks.onerror = function (err) {
-        console.error('client error: ' + err)
-        process.exit(1)
-    }
-
     server.listen(config.port || 389, function () {
         console.log('LDAP server listening at %s', server.url);
     });
@@ -645,133 +663,124 @@ function startServer() {
 
 function startupInitWithMappingUsers(configUsers, isUid, onUserStatus, callback) {
     var done = false
-
-    var initDone = function () {
-        done = true
-        clientCallbacks.onend = null
-        clientCallbacks.onerror = null
-        callback()
-    }
-    clientCallbacks.onend = function () {
-        var err = new Error('client unexpected end')
+    var initDone = function (client, err) {
         if (!done) {
-            callback(err)
-            return
-        }
-        assert.ifError(err)
-    }
-    clientCallbacks.onerror = function (err) {
-        if (!done) {
-            callback(err)
-            return
-        }
-        assert.ifError(err)
-    }
-
-    client.bind(config.server.bindDN, config.server.bindPW, function (err) {
-        if (err) {
-            if (!done) {
-                callback(err);
-                return;
+            done = true
+            if (client) {
+                client.release()
             }
-            assert.ifError(err)
+            callback(err)
+            return
         }
+        assert.ifError(err ? err : new Error('unexpected done'))
+    }
 
-        console.log('client bind successful');
+    if (!configUsers || configUsers.length <= 0) {
+        initDone()
+        return
+    }
 
-        if (configUsers && configUsers.length > 0) {
-            var counter = 0
-            configUsers.forEach(function (user) {
-                var opts = {
-                    filter: '(&(objectclass=organizationalperson)',
-                    scope: 'sub',
-                };
-                if (isUid) {
-                    opts.filter += '(uid=' + user.account_name + '))';
-                } else {
-                    opts.filter += '(sAMAccountName=' + user.account_name + '))';
-                }
-
-                var tmp_groupmaps = []
-                var tmp_mapping_users = []
-                var tmp_mapping_user_dns = {}
-                var found = false
-
-                client.search(user.search_base, opts, function (err, search) {
-                    if (err) {
-                        if (!done) {
-                            callback(err);
-                            return;
-                        }
-                        assert.ifError(err)
-                    }
-
-                    search.on('searchEntry', function (entry) {
-                        var obj = {
-                            dn: entry.dn.toString(),
-                            attributes: {},
-                        };
-                        var dn = ldap.parseDN(obj.dn);
-                        if (!('cn' in dn.rdns[0].attrs)) {
-                            // only map person
-                            return;
-                        }
-                        var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mapping_group
-                        dn = ldap.parseDN(mapDN)
-
-                        entry.attributes.forEach(function (a) {
-                            obj.attributes[a.type] = a._vals;
-                            //obj.attributes.push(a.json || a);
-                        });
-                        if (!obj.attributes.uid && obj.attributes.sAMAccountName) {
-                            obj.attributes.uid = obj.attributes.sAMAccountName;
-                        }
-                        tmp_mapping_user_dns[obj.attributes.sAMAccountName[0].toString('utf-8')] = obj.dn
-
-                        obj.attributes.department = [get_ou_title(dn)];
-                        obj.dn = dn.toString()
-                        if (obj.attributes.distinguishedName) {
-                            obj.attributes.distinguishedName = [obj.dn];
-                        }
-                        var memberOf = obj.attributes.memberOf || [];
-                        obj.attributes.memberOf = Array.prototype.concat.apply(memberOf, get_ou_titles(dn));
-
-                        add_to_group_maps(obj, dn, tmp_groupmaps);
-
-                        tmp_mapping_users.push(obj);
-                        found = true
-                    });
-                    search.on('searchReference', function (referral) {
-                        //console.log('referral: ' + referral.uris.join());
-                    });
-                    search.on('error', function (err) {
-                        console.error('mapping search error: ' + err.message);
-                        //process.exit(1)
-                    });
-                    search.on('end', function (result) {
-                        if (!found) {
-                            onUserStatus(user, STATUS_NOT_FOUND)
-                        }
-                        if (counter === 0) {
-                            mappingUsers = tmp_mapping_users;
-                            mappingGroupMaps = tmp_groupmaps;
-                            mappingUserDNs = tmp_mapping_user_dns;
-                        } else {
-                            mappingUsers = Array.prototype.concat.apply(mappingUsers, tmp_mapping_users)
-                            merge_group_maps(mappingGroupMaps, tmp_groupmaps)
-                            mappingUserDNs = Object.assign(mappingUserDNs, tmp_mapping_user_dns)
-                        }
-                        counter++
-                        if (counter >= configUsers.length) {
-                            initDone()
-                        }
-                    });
-                })
-            })
+    var counter = 0
+    var searchNext = function (client, i) {
+        var user = configUsers[i]
+        var opts = {
+            filter: '(&(objectclass=organizationalperson)',
+            scope: 'sub',
+        };
+        if (isUid) {
+            opts.filter += '(uid=' + user.account_name + '))';
         } else {
-            initDone()
+            opts.filter += '(sAMAccountName=' + user.account_name + '))';
         }
-    });
+
+        var tmp_groupmaps = []
+        var tmp_mapping_users = []
+        var tmp_mapping_user_dns = {}
+        var found = false
+
+        client.search(user.search_base, opts, function (err, search) {
+            if (err) {
+                initDone(client, err)
+                return
+            }
+
+            search.on('searchEntry', function (entry) {
+                var obj = {
+                    dn: entry.dn.toString(),
+                    attributes: {},
+                };
+                var dn = ldap.parseDN(obj.dn);
+                if (!('cn' in dn.rdns[0].attrs)) {
+                    // only map person
+                    return;
+                }
+                var mapDN = dn.rdns[0].attrs['cn'].name + '=' + dn.rdns[0].attrs['cn'].value + ', ' + user.mapping_group
+                dn = ldap.parseDN(mapDN)
+
+                entry.attributes.forEach(function (a) {
+                    obj.attributes[a.type] = a._vals;
+                    //obj.attributes.push(a.json || a);
+                });
+                if (!obj.attributes.uid && obj.attributes.sAMAccountName) {
+                    obj.attributes.uid = obj.attributes.sAMAccountName;
+                }
+                tmp_mapping_user_dns[obj.attributes.sAMAccountName[0].toString('utf-8')] = obj.dn
+
+                obj.attributes.department = [get_ou_title(dn)];
+                obj.dn = dn.toString()
+                if (obj.attributes.distinguishedName) {
+                    obj.attributes.distinguishedName = [obj.dn];
+                }
+                var memberOf = obj.attributes.memberOf || [];
+                obj.attributes.memberOf = Array.prototype.concat.apply(memberOf, get_ou_titles(dn));
+
+                add_to_group_maps(obj, dn, tmp_groupmaps);
+
+                tmp_mapping_users.push(obj);
+                found = true
+            });
+            search.on('searchReference', function (referral) {
+                //console.log('referral: ' + referral.uris.join());
+            });
+            search.on('error', function (err) {
+                console.error('mapping search error: ' + err.message);
+                //process.exit(1)
+            });
+            search.on('end', function (result) {
+                if (!found) {
+                    onUserStatus(user, STATUS_NOT_FOUND)
+                }
+                if (counter === 0) {
+                    mappingUsers = tmp_mapping_users;
+                    mappingGroupMaps = tmp_groupmaps;
+                    mappingUserDNs = tmp_mapping_user_dns;
+                } else {
+                    mappingUsers = Array.prototype.concat.apply(mappingUsers, tmp_mapping_users)
+                    merge_group_maps(mappingGroupMaps, tmp_groupmaps)
+                    mappingUserDNs = Object.assign(mappingUserDNs, tmp_mapping_user_dns)
+                }
+                counter++
+                if (counter >= configUsers.length) {
+                    initDone(client)
+                } else {
+                    searchNext(client, i + 1)
+                }
+            });
+        })
+    }
+
+    ldapClientPool.getClient({
+        dn: config.server.bindDN,
+        password: config.server.bindPW,
+    }, {
+        onbind: function () {
+            console.log('client bind successful')
+            searchNext(this, 0)
+        },
+        onerror: function (err) {
+            initDone(null, err)
+        },
+    })
 }
 
 function queryDb(sql, values) {
@@ -803,17 +812,6 @@ async function updateUsersStatus(userIds, status) {
 }
 
 async function main() {
-    client.on('end', function () {
-        if (clientCallbacks.onend) {
-            clientCallbacks.onend()
-        }
-    });
-    client.on('error', function (err) {
-        if (clientCallbacks.onerror) {
-            clientCallbacks.onerror(err)
-        }
-    });
-
     let res1, res2
     try {
         res1 = await queryDb('SELECT id, account_name, search_base, mapping_group, status FROM lp_mapping_users WHERE delete_time = 0 AND status = ?', [STATUS_DEFAULT])
