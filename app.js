@@ -2,7 +2,8 @@
 var assert = require('assert');
 var ldap = require('ldapjs');
 var fs = require('fs');
-var mysql = require('mysql');
+var { runApiServer } = require('./api')
+var { initDbPool, queryDb } = require('./db')
 var ldapClient = require('./ldap-client')
 
 var STATUS_DEFAULT = 0
@@ -23,7 +24,6 @@ for (var i = 2; i < process.argv.length; i++) {
     }
 }
 
-var dbPool = config.mysql ? mysql.createPool(config.mysql) : null;
 var ldapClientPool = ldapClient.createPool({
     url: config.server.url
 });
@@ -656,6 +656,13 @@ server.search('', function (req, res, next) {
 });
 
 function startServer() {
+    if (config.api) {
+        if (config.mysql) {
+            runApiServer(config.api)
+        } else {
+            console.log('API server disabled as no db configured')
+        }
+    }
     server.listen(config.port || 389, function () {
         console.log('LDAP server listening at %s', server.url);
     });
@@ -783,35 +790,14 @@ function startupInitWithMappingUsers(configUsers, isUid, onUserStatus, callback)
     })
 }
 
-function queryDb(sql, values) {
-    return new Promise(function (resolve, reject) {
-        if (!dbPool) {
-            reject(new Error('no mysql db configured'))
-            return
-        }
-        dbPool.getConnection(function (err, connection) {
-            if (err) {
-                reject(err)
-                return
-            }
-            connection.query(sql, values, function (err, results) {
-                connection.release()
-                if (err) {
-                    reject(err)
-                    return
-                }
-                resolve({ results })
-            })
-        })
-    })
-}
-
 async function updateUsersStatus(userIds, status) {
     return await queryDb('UPDATE lp_mapping_users SET status = ?, modified_time = ? WHERE id IN (?) AND delete_time = 0',
         [status, Math.floor(Date.now() / 1000), userIds])
 }
 
 async function main() {
+    initDbPool(config.mysql)
+
     let res1, res2
     try {
         res1 = await queryDb('SELECT id, account_name, search_base, mapping_group, status FROM lp_mapping_users WHERE delete_time = 0 AND status = ?', [STATUS_DEFAULT])

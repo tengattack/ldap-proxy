@@ -6,12 +6,20 @@
         "bindDN": "ldap",
         "bindPW": "passwd"
     },
+    "api": {
+        "port": 3000,
+        "key": "testkey",
+        "mapping": {
+            "search_base": "dc=domain, dc=local",
+            "mapping_group_suffix": "ou=domain.local"
+        }
+    },
     "mysql": {
-        "connectionLimit": 10,
         "host": "example.org",
         "user": "bob",
         "password": "secret",
-        "database": "my_db"
+        "database": "my_db",
+        "connectionLimit": 10
     },
     "searchBases": [
         { "search_base": "ou=domain.local, dc=domain, dc=local" }
