@@ -48,12 +48,22 @@ api.post('/ldap-proxy/add-user', async (req, res) => {
     res.status(500).json(errorResp(500, 'server internal error: ' + e.message))
     return
   }
-  res.json(successResp(null, 'success'))
 
   // restart server
   setTimeout(() => {
     process.exit(2)
   }, 2000)
+
+  res.json(successResp(null, 'success'))
+})
+
+api.post('/ldap-proxy/restart', async (req, res) => {
+  // restart server
+  setTimeout(() => {
+    process.exit(2)
+  }, 2000)
+
+  res.json(successResp(null, 'success'))
 })
 
 function runApiServer(config, mapping) {
