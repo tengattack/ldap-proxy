@@ -238,12 +238,7 @@ function baseSearchInitAll(configSearchBaseResults, callback) {
             search.on('searchReference', function (referral) {
                 //console.log('referral: ' + referral.uris.join());
             });
-            search.on('error', function (err) {
-                console.error('base search error: ' + err.message);
-                //process.exit(1)
-            });
-            search.on('end', function (result) {
-                //console.log('status: ' + result.status);
+            var onNext = function () {
                 searchCount++;
                 if (searchCount < configSearchBases.length) {
                     searchNext(client, i + 1);
@@ -259,6 +254,14 @@ function baseSearchInitAll(configSearchBaseResults, callback) {
                     console.log('all user entries: ' + entries.length + ', mapping: ' + mappingUsers.length);
                     initDone(client)
                 }
+            }
+            search.on('error', function (err) {
+                console.error('base search ' + base + ' error: ' + err.message);
+                onNext()
+            });
+            search.on('end', function (result) {
+                //console.log('status: ' + result.status);
+                onNext()
             });
         });
 
@@ -633,11 +636,11 @@ server.search('', function (req, res, next) {
                 searchDone(client);
             }
             search.on('error', function (err) {
-                console.error('search error: ' + err.message);
-                onNext();
+                console.error('search ' + base + ' error: ' + err.message)
+                onNext()
             });
             search.on('end', function (result) {
-                onNext();
+                onNext()
             });
         });
     };
